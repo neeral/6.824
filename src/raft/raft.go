@@ -23,8 +23,6 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
-
-
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -49,17 +47,32 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	state       NodeState
+	currentTerm int
+	votedFor    *int
+	logs        []LogEntry // append-only log, latest entry is at the end
+}
 
+type NodeState int
+
+const (
+	Candidate NodeState = iota
+	Follower
+	Leader
+)
+
+type LogEntry struct {
+	term  int
+	index int
+	entry []byte
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.state == Leader
 }
 
 //
@@ -93,15 +106,16 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -110,6 +124,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -117,6 +133,41 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.checkTerm(args.Term)
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+	}
+	if (rf.votedFor == nil || *rf.votedFor == args.CandidateId) &&
+		rf.isAtleastAsUptodate(args) {
+		reply.VoteGranted = true
+		rf.votedFor = new(int)
+		*rf.votedFor = args.CandidateId
+	}
+	reply.VoteGranted = false
+}
+
+// if RPC request or response contains term T > currentTerm
+//   set currentTerm = T
+//   convert to Follower
+func (rf *Raft) checkTerm(receivedTerm int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if receivedTerm > rf.currentTerm {
+		rf.currentTerm = receivedTerm
+		rf.state = Follower
+		rf.votedFor = nil
+	}
+}
+
+// RequestVoteArgs is at least as up-to-date as receiver's log
+func (rf *Raft) isAtleastAsUptodate(args *RequestVoteArgs) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastEntry := rf.logs[len(rf.logs)-1]
+	return lastEntry.term < args.LastLogTerm || (lastEntry.term == args.LastLogTerm && lastEntry.index <= args.LastLogIndex)
 }
 
 //
@@ -153,7 +204,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -173,7 +223,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -207,10 +256,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.state = Follower
+	rf.currentTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
