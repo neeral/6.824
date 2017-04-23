@@ -231,9 +231,24 @@ type AppendEntriesReply struct {
 // AppendEntries RPC handler.
 //
 func (rf *Raft) AppendEntriesRequestVote(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.checkTerm(args.Term)
+	// TODO update heartbeat timestamp
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	}
+	// TODO add other checks and handling
+	reply.Success = true
 }
 
 func (rf *Raft) sendHeartbeats() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if rf.state != Leader {
 		DPrintf("%d is not leader but attempted sending heartbeats", rf.me)
 		return false
