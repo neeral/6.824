@@ -205,6 +205,64 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 //
+// AppendEntries RPC arguments structure.
+// field names must start with capital letters!
+//
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+	/* commenting out things i'll need later */
+	//	PrevLogIndex int
+	//	PrevLogTerm  int
+	Entries []LogEntry
+	//	LeaderCommit int
+}
+
+//
+// AppendEntries RPC reply structure.
+// field names must start with capital letters!
+//
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+//
+// AppendEntries RPC handler.
+//
+func (rf *Raft) AppendEntriesRequestVote(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+}
+
+func (rf *Raft) sendHeartbeats() bool {
+	if rf.state != Leader {
+		DPrintf("%d is not leader but attempted sending heartbeats", rf.me)
+		return false
+	}
+	// TODO handle replies, especially missing reply
+	args := &AppendEntriesArgs{}
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.Entries = []LogEntry{}
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(server, args, &reply)
+			// TODO use $ok and $reply
+		}(i)
+	}
+	return true // maybe?
+}
+
+// send AppendEntries RPC to server
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+//
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
