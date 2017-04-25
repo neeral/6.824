@@ -81,9 +81,9 @@ const (
 )
 
 type LogEntry struct {
-	term  int
-	index int
-	entry []byte
+	Term  int
+	Index int
+	Entry []byte
 }
 
 // return currentTerm and whether this server
@@ -188,7 +188,7 @@ func (rf *Raft) isAtleastAsUptodate(args *RequestVoteArgs) bool {
 		return true
 	}
 	lastEntry := rf.logs[len(rf.logs)-1]
-	return lastEntry.term < args.LastLogTerm || (lastEntry.term == args.LastLogTerm && lastEntry.index <= args.LastLogIndex)
+	return lastEntry.Term < args.LastLogTerm || (lastEntry.Term == args.LastLogTerm && lastEntry.Index <= args.LastLogIndex)
 }
 
 //
@@ -248,8 +248,8 @@ func (rf *Raft) promoteToCandidate() {
 		args.LastLogTerm = 0
 	} else {
 		last := rf.logs[len(rf.logs)-1]
-		args.LastLogIndex = last.index
-		args.LastLogTerm = last.term
+		args.LastLogIndex = last.Index
+		args.LastLogTerm = last.Term
 	}
 
 	DPrintf("%d asking for votes\n", rf.me)
@@ -356,7 +356,7 @@ type AppendEntriesArgs struct {
 	// commenting out things i'll need later
 	//	PrevLogIndex int
 	//	PrevLogTerm  int
-	//  Entries []LogEntry
+	Entries []LogEntry
 	//	LeaderCommit int
 }
 
@@ -399,7 +399,7 @@ func (rf *Raft) sendHeartbeats() bool {
 	args := &AppendEntriesArgs{}
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
-	//args.Entries = make([]LogEntry, 0)
+	args.Entries = make([]LogEntry, 0)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
