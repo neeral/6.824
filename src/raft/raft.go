@@ -51,12 +51,18 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state       NodeState
+	state NodeState
+	// Persistent state
 	currentTerm int
-	votedFor    *int          // ptr so it can be nil
-	logs        []LogEntry    // append-only log, latest entry is at the end
+	votedFor    *int       // ptr so it can be nil
+	logs        []LogEntry // append-only log, latest entry is at the end
+	// Volatile state
 	heartbeat   time.Time     // timestamp of last received heartbeat
 	timeout     time.Duration // election timeout
+	commitIndex int
+	lastApplied int
+	nextIndex   []int
+	matchIndex  []int
 }
 
 type NodeState int
@@ -184,11 +190,10 @@ func (rf *Raft) checkTerm(receivedTerm int) bool {
 
 // RequestVoteArgs is at least as up-to-date as receiver's log
 func (rf *Raft) isAtleastAsUptodate(args *RequestVoteArgs) bool {
-	if len(rf.logs) == 0 {
-		return true
+	if lastEntry, ok := rf.lastEntry(); ok {
+		return lastEntry.Term < args.LastLogTerm || (lastEntry.Term == args.LastLogTerm && lastEntry.Index <= args.LastLogIndex)
 	}
-	lastEntry := rf.logs[len(rf.logs)-1]
-	return lastEntry.Term < args.LastLogTerm || (lastEntry.Term == args.LastLogTerm && lastEntry.Index <= args.LastLogIndex)
+	return true
 }
 
 //
@@ -306,9 +311,25 @@ func (rf *Raft) promoteToCandidate() {
 			DPrintf("%d has won election %d\n", rf.me, rf.currentTerm)
 			rf.state = Leader
 			rf.sendHeartbeats()
+			lastIndex := 0
+			if lastEntry, ok := rf.lastEntry(); ok {
+				lastIndex = lastEntry.Index
+			}
+			for i := range rf.peers {
+				rf.nextIndex[i] = lastIndex + 1
+				rf.matchIndex[i] = 0
+			}
 			break
 		}
 	}
+}
+
+func (rf *Raft) lastEntry() (last LogEntry, ok bool) {
+	if len(rf.logs) == 0 {
+		ok = false
+		return
+	}
+	return rf.logs[len(rf.logs)-1], true
 }
 
 // electLeader should be run in a separate goroutine. It continually checks
@@ -354,10 +375,10 @@ type AppendEntriesArgs struct {
 	Term     int
 	LeaderId int
 	// commenting out things i'll need later
-	//	PrevLogIndex int
-	//	PrevLogTerm  int
-	Entries []LogEntry
-	//	LeaderCommit int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 //
@@ -400,6 +421,13 @@ func (rf *Raft) sendHeartbeats() bool {
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.Entries = make([]LogEntry, 0)
+	if lastEntry, ok := rf.lastEntry(); ok {
+		args.PrevLogIndex = lastEntry.Index
+		args.PrevLogTerm = lastEntry.Term
+	}
+	args.PrevLogIndex = 0
+	args.PrevLogTerm = 0
+	args.LeaderCommit = rf.commitIndex
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -474,6 +502,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.timeout = randomTimeout()
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	for i := range peers {
+		rf.nextIndex[i] = 0
+		rf.matchIndex[i] = 0
+	}
 	rand.Seed(int64(me))
 
 	// initialize from state persisted before a crash
