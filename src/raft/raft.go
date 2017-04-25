@@ -47,6 +47,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	applyCV   *sync.Cond          // Conditional variable to protect shared access to applying log entries
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -332,11 +333,11 @@ func (rf *Raft) lastEntry() (last LogEntry, ok bool) {
 	return rf.logs[len(rf.logs)-1], true
 }
 
-// electLeader should be run in a separate goroutine. It continually checks
+// mainLoop should be run in a separate goroutine. It continually checks
 // whether no heartbeats have been received by the election timeout window.
 // On receiving a heartbeat, it resets the election timeout. If none received,
 // promotes to Candidate state. If already a Leader, sends heartbeats.
-func (rf *Raft) electLeader() {
+func (rf *Raft) mainLoop() {
 	for true {
 		rf.mu.Lock()
 		state := rf.state
@@ -364,6 +365,44 @@ func (rf *Raft) electLeader() {
 			}
 			rf.mu.Unlock()
 		}
+	}
+}
+
+func findLogEntryWithIndex(logs []LogEntry, idx int) (*LogEntry, bool) {
+	for _, entry := range logs {
+		if entry.Index == idx {
+			return &entry, true
+		}
+	}
+	return nil, false
+}
+
+// applyLogEntries should be run in a separate goroutine. It continually checks
+// whether there are any committed log entries that have not been applied, and
+// applies these.
+func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
+	for true {
+		rf.mu.Lock()        // accessing state in rf
+		rf.applyCV.L.Lock() // waiting on CV
+		for rf.commitIndex <= rf.lastApplied {
+			rf.mu.Unlock() // release while waiting
+			rf.applyCV.Wait()
+			rf.mu.Lock()
+		}
+		rf.applyCV.L.Unlock()
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			logEntry, ok := findLogEntryWithIndex(rf.logs, i)
+			if !ok {
+				DPrintf("%v unable to find entry with index %v", rf.me, i)
+				break
+			}
+			applyMsg := ApplyMsg{}
+			applyMsg.Index = logEntry.Index
+			applyMsg.Command = logEntry.Entry
+			applyCh <- applyMsg
+			rf.lastApplied += 1
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -402,12 +441,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartbeat = time.Now()
 	rf.timeout = randomTimeout()
 	reply.Term = rf.currentTerm
+	// 1.
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
 	// TODO add other checks and handling
 	reply.Success = true
+
+	// 5.
+	if args.LeaderCommit > rf.commitIndex {
+		indexOfLastNewEntry := -1
+		if lastEntry, ok := rf.lastEntry(); ok {
+			indexOfLastNewEntry = lastEntry.Index
+		}
+		rf.commitIndex = Min(args.LeaderCommit, indexOfLastNewEntry)
+		rf.applyCV.L.Lock()
+		defer rf.applyCV.L.Unlock()
+		rf.applyCV.Signal()
+	}
 }
 
 func (rf *Raft) sendHeartbeats() bool {
@@ -515,7 +567,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go rf.electLeader()
+	go rf.mainLoop()
+
+	m := sync.Mutex{}
+	rf.applyCV = sync.NewCond(&m)
+	go rf.applyLogEntries(applyCh)
 
 	return rf
 }
