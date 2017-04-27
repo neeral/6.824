@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
+	"log"
 	"math/rand"
 	"runtime/debug"
 	"sync"
@@ -122,13 +125,14 @@ func (rf *Raft) Lock() {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	DPrintf("%v encoded (%v,%v,%v)", rf.me, data)
 }
 
 //
@@ -136,14 +140,22 @@ func (rf *Raft) persist() {
 //
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	decode(rf.me, d, &rf.currentTerm)
+	decode(rf.me, d, &rf.votedFor)
+	decode(rf.me, d, &rf.logs)
+	DPrintf("%v decoded", rf.me)
+}
+
+func decode(me int, d *gob.Decoder, e interface{}) {
+	if err := d.Decode(e); err != nil {
+		log.Fatalf("%v decode error: %v", me, err)
+	}
+	DPrintf("%v decoded %v", me, e)
 }
 
 //
