@@ -128,11 +128,15 @@ func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
+	b := rf.votedFor == nil
+	e.Encode(b)
+	if !b {
+		e.Encode(*rf.votedFor)
+	}
 	e.Encode(rf.logs)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	DPrintf("%v encoded (%v,%v,%v)", rf.me, data)
+	DPrintf("%v encoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
 }
 
 //
@@ -146,16 +150,20 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
 	decode(rf.me, d, &rf.currentTerm)
-	decode(rf.me, d, &rf.votedFor)
+	var b bool
+	decode(rf.me, d, &b)
+	if !b {
+		rf.votedFor = new(int)
+		decode(rf.me, d, rf.votedFor)
+	}
 	decode(rf.me, d, &rf.logs)
-	DPrintf("%v decoded", rf.me)
+	DPrintf("%v decoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
 }
 
 func decode(me int, d *gob.Decoder, e interface{}) {
 	if err := d.Decode(e); err != nil {
 		log.Fatalf("%v decode error: %v", me, err)
 	}
-	DPrintf("%v decoded %v", me, e)
 }
 
 //
@@ -188,6 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf("%d received RequestVote from %d in term %d\n", rf.me, args.CandidateId, args.Term)
 	rf.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	rf.checkTerm(args.Term)
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -283,8 +292,9 @@ func (rf *Raft) promoteToCandidate() {
 		args.LastLogIndex = last.Index
 		args.LastLogTerm = last.Term
 	}
+	rf.persist()
 
-	DPrintf("%d asking for votes\n", rf.me)
+	DPrintf("%d asking for votes", rf.me)
 	// send RequestVote in parallel to all servers
 	ch := make(chan RequestVoteReply, len(rf.peers)-1)
 	for i := range rf.peers {
@@ -296,7 +306,7 @@ func (rf *Raft) promoteToCandidate() {
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, args, &reply)
 			// TODO handle ok=false by retrying
-			DPrintf("%d received vote reply from %v ok? %v %v term %v\n", rf.me, server, ok, reply.VoteGranted, reply.Term)
+			DPrintf("%d received vote reply from %v ok? %v %v term %v", rf.me, server, ok, reply.VoteGranted, reply.Term)
 			if ok {
 				ch <- reply
 			}
@@ -351,7 +361,7 @@ func (rf *Raft) promoteToCandidate() {
 		rf.mu.Unlock()
 		return
 	}
-	DPrintf("%d has won election %d\n", rf.me, rf.currentTerm)
+	DPrintf("%d has won election %d", rf.me, rf.currentTerm)
 	rf.state = Leader
 	lastIndex := 0
 	xLastEntry, xOk := rf.lastEntry()
@@ -427,14 +437,11 @@ func findLogEntryWithIndex(logs []LogEntry, idx int) (*LogEntry, bool) {
 // applies these.
 func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 	for true {
-		DPrintf("applyLogEntries %v attempting to get lock", rf.me)
 		rf.Lock()           // accessing state in rf
 		rf.applyCV.L.Lock() // waiting on CV
 		for rf.commitIndex <= rf.lastApplied {
 			rf.mu.Unlock() // release while waiting
-			DPrintf("applyLogEntries %v wait()", rf.me)
 			rf.applyCV.Wait()
-			DPrintf("applyLogEntries %v attempting to get lock", rf.me)
 			rf.Lock()
 		}
 		rf.applyCV.L.Unlock()
@@ -483,6 +490,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	DPrintf("%d AppendEntries handler for %v %v\n", rf.me, *args, rf.state)
 	rf.checkTerm(args.Term)
@@ -564,7 +572,7 @@ func (rf *Raft) sendHeartbeats() bool {
 		DPrintf("%d is not leader but attempted sending heartbeats", rf.me)
 		return false
 	}
-	DPrintf("%v sendHeartbeats %v", rf.me, rf.state)
+	DPrintf("%v sendHeartbeats", rf.me)
 	args := createBasicAppendEntriesArgs(rf)
 	return rf.sendAppendEntriesToAll(&args)
 }
@@ -699,6 +707,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry.Command = command
 	rf.logs = append(rf.logs, entry)
 	rf.matchIndexIs(rf.me, index)
+	rf.persist()
 	DPrintf("Start(%v)", entry.Command)
 
 	// create AppendEntriesArg and send RPC, then return
