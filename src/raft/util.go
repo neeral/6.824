@@ -1,6 +1,9 @@
 package raft
 
-import "log"
+import (
+	"log"
+	"sort"
+)
 
 // Debugging
 const Debug = 0
@@ -18,4 +21,15 @@ func Min(x, y int) int {
 	} else {
 		return y
 	}
+}
+
+func Middle(a []int) (int, bool) {
+	if len(a) == 0 {
+		return -1, false
+	}
+	mid := len(a) / 2
+	b := make([]int, len(a))
+	copy(b, a)
+	sort.Ints(b)
+	return b[mid], true
 }
