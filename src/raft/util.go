@@ -6,7 +6,9 @@ import (
 )
 
 // Debugging
-const Debug = 0
+const kDebug = 1
+
+var Debug = kDebug
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -33,3 +35,13 @@ func Middle(a []int) (int, bool) {
 	sort.Ints(b)
 	return b[mid], true
 }
+
+func Max(x, y int) int {
+	if x > y {
+		return x
+	} else {
+		return y
+	}
+}
+
+const MinIndex = 1

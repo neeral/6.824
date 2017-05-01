@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"labrpc"
 	"log"
 	"math/rand"
@@ -91,7 +92,8 @@ const (
 	Leader
 )
 
-const DebugLock = 0
+const DebugLock = 1
+const DebugEncoding = 0
 
 type LogEntry struct {
 	Term    int
@@ -136,7 +138,9 @@ func (rf *Raft) persist() {
 	e.Encode(rf.logs)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	DPrintf("%v encoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
+	if DebugEncoding > 0 {
+		DPrintf("%v encoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
+	}
 }
 
 //
@@ -157,7 +161,9 @@ func (rf *Raft) readPersist(data []byte) {
 		decode(rf.me, d, rf.votedFor)
 	}
 	decode(rf.me, d, &rf.logs)
-	DPrintf("%v decoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
+	if DebugEncoding > 0 {
+		DPrintf("%v decoded (%v,%v,[-,]%v)", rf.me, rf.currentTerm, b, len(rf.logs))
+	}
 }
 
 func decode(me int, d *gob.Decoder, e interface{}) {
@@ -186,6 +192,14 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
+}
+
+func (rvr RequestVoteReply) String() string {
+	voteGranted := "No"
+	if rvr.VoteGranted {
+		voteGranted = "Yes"
+	}
+	return fmt.Sprintf("%v(%v)", voteGranted, rvr.Term)
 }
 
 //
@@ -306,9 +320,11 @@ func (rf *Raft) promoteToCandidate() {
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, args, &reply)
 			// TODO handle ok=false by retrying
-			DPrintf("%d received vote reply from %v ok? %v %v term %v", rf.me, server, ok, reply.VoteGranted, reply.Term)
 			if ok {
+				DPrintf("%d received vote reply from %v %v", rf.me, server, reply)
 				ch <- reply
+			} else {
+				DPrintf("%d received vote reply from %v timed out", rf.me, server)
 			}
 		}(i)
 	}
@@ -480,8 +496,20 @@ type AppendEntriesArgs struct {
 // field names must start with capital letters!
 //
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term             int
+	Success          bool
+	ConflictingIndex int
+	ConflictingTerm  *int
+}
+
+func (aer AppendEntriesReply) String() string {
+	if aer.Success {
+		return fmt.Sprintf("Yes(%v)", aer.Term)
+	} else if aer.ConflictingTerm == nil {
+		return fmt.Sprintf("No(%v, @%v)", aer.Term, aer.ConflictingIndex)
+	} else {
+		return fmt.Sprintf("No(%v, %v@%v)", aer.Term, *aer.ConflictingTerm, aer.ConflictingIndex)
+	}
 }
 
 //
@@ -492,7 +520,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	DPrintf("%d AppendEntries handler for %v %v\n", rf.me, *args, rf.state)
+	DPrintf("%d AppendEntries handler for %v", rf.me, *args)
 	rf.checkTerm(args.Term)
 	rf.heartbeat = time.Now()
 	rf.timeout = randomTimeout()
@@ -500,6 +528,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 1. terms differ
 	if args.Term < rf.currentTerm {
 		reply.Success = false
+		DPrintf("%v responding with %v", rf.me, *reply)
 		return
 	}
 
@@ -507,20 +536,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > 0 {
 		if args.PrevLogIndex-1 >= len(rf.logs) {
 			reply.Success = false
+			reply.ConflictingIndex = Max(len(rf.logs), MinIndex)
+			reply.ConflictingTerm = nil
+			DPrintf("%v responding with %v", rf.me, *reply)
 			return
 		}
 		prevLogEntry := rf.logs[args.PrevLogIndex-1]
 		if prevLogEntry.Index != args.PrevLogIndex {
-			reply.Success = false
-			return
+			panic(fmt.Sprintf("LogEntry at %v has index %v", args.PrevLogIndex, prevLogEntry.Index))
 		}
 		if prevLogEntry.Term != args.PrevLogTerm {
 			reply.Success = false
+			entry, _ := rf.findFirstLogEntryWithTerm(prevLogEntry.Term)
+			reply.ConflictingIndex = entry.Index
+			reply.ConflictingTerm = new(int)
+			*reply.ConflictingTerm = prevLogEntry.Term
+			DPrintf("%v responding with %v", rf.me, *reply)
 			return
 		}
 	}
 
-	// TODO add other checks and handling
 	reply.Success = true
 
 	// 3. existing entry conflicts
@@ -603,7 +638,37 @@ func (rf *Raft) matchIndexIs(server, newValue int) {
 	rf.matchIndex[server] = newValue
 }
 
+func (rf *Raft) findFirstLogEntryWithTerm(term int) (*LogEntry, bool) {
+	for _, entry := range rf.logs {
+		if entry.Term == term {
+			return &entry, true
+		}
+	}
+	return nil, false
+}
+
+func (rf *Raft) findLastLogEntryWithTerm(term *int) (*LogEntry, bool) {
+	if term == nil {
+		return nil, false
+	}
+	found := false
+	var prev LogEntry
+	for _, entry := range rf.logs {
+		if entry.Term == *term {
+			found = true
+		} else if found {
+			break
+		}
+		prev = entry
+	}
+	return &prev, found
+}
+
 func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
+	end := 0
+	if lastEntry, ok := rf.lastEntry(); ok {
+		end = lastEntry.Index
+	}
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -617,11 +682,9 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 			args.PrevLogIndex = entry.Index
 			args.PrevLogTerm = entry.Term
 		}
-		end := 0
-		if lastEntry, ok := rf.lastEntry(); ok {
-			end = lastEntry.Index
-		}
+
 		var entries []LogEntry
+		DPrintf("%v append [%v,%v)", rf.me, rf.nextIndex[i]-1, end)
 		for j := rf.nextIndex[i] - 1; j < end; j++ {
 			entries = append(entries, rf.logs[j])
 		}
@@ -631,11 +694,12 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 		go func(server int, args *AppendEntriesArgs) {
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(server, args, &reply)
-			DPrintf("%v AppendEntries %v reply %v from %v for %v", rf.me, ok, reply, server, *args)
 			if !ok {
+				DPrintf("%v AppendEntries reply timed out from %v for %v", rf.me, server, *args)
 				// TODO handle failure
 				return
 			}
+			DPrintf("%v AppendEntries %v reply from %v for %v", rf.me, reply, server, *args)
 			rf.Lock()
 			defer rf.mu.Unlock()
 			if rf.state != Leader {
@@ -652,7 +716,14 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 				rf.nextIndex[server] = lastEntry.Index + 1
 				rf.matchIndexIs(server, lastEntry.Index)
 			} else if !reply.Success {
-				rf.nextIndex[server] -= 1
+				DPrintf("%v processing No() - begin nextIndex[%v]=%v", rf.me, server, rf.nextIndex[server])
+				if entry, ok := rf.findLastLogEntryWithTerm(reply.ConflictingTerm); ok {
+					DPrintf("%v findLastLogEntryWithTerm(%v)=%v", rf.me, *reply.ConflictingTerm, *entry)
+					rf.nextIndex[server] = entry.Index + 1
+				} else {
+					rf.nextIndex[server] = reply.ConflictingIndex
+				}
+				DPrintf("%v processing No() - end nextIndex[%v]=%v", rf.me, server, rf.nextIndex[server])
 				// TODO retry
 			} else {
 				rf.nextIndex[server] = args.PrevLogIndex + 1
@@ -725,6 +796,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.Lock()
+	defer rf.mu.Unlock()
+	Debug = 0
+	rf.state = Follower
+	rf.timeout = 10 * time.Minute // won't bother us for some time
 }
 
 //
@@ -740,6 +816,7 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	Debug = kDebug
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
