@@ -17,11 +17,25 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType OpType
+	Key    string
+	Value  string // optional
+}
+
+func OpAppend(key, value string) Op {
+	return Op{Append, key, value}
+}
+
+func OpGet(key string) Op {
+	return Op{Get, key, ""}
+}
+
+func OpPut(key, value string) Op {
+	return Op{Put, key, value}
 }
 
 type RaftKV struct {
@@ -33,8 +47,8 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	state map[string]string
 }
-
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.

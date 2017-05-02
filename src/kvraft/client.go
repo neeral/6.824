@@ -4,7 +4,6 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
@@ -39,7 +38,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	requestId := ck.nextRequestId()
+	args := GetArgs{key, requestId}
+	reply := GetReply{}
+	i := ck.leader()
+	ok := ck.servers[i].Call("RaftKV.Get", &args, &reply)
+	DPrintf("Get %v", ok)
+	return reply.Value
 }
 
 //
@@ -54,6 +59,13 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	requestId := ck.nextRequestId()
+	args := PutAppendArgs{key, value, op, requestId}
+	reply := PutAppendReply{}
+	i := ck.leader()
+	ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
+	DPrintf("PutAppend %v", ok)
+	// TODO implement retries
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -61,4 +73,14 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) nextRequestId() RequestId {
+	// TODO implement
+	return RequestId{"", -1}
+}
+
+func (ck *Clerk) leader() int {
+	// TODO implement
+	return -1
 }
