@@ -3,15 +3,16 @@ package raft
 import (
 	"log"
 	"sort"
+	"sync/atomic"
 )
 
 // Debugging
-const kDebug = 1
+const kDebug = 0
 
-var Debug = kDebug
+var Debug int32 = kDebug
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
+	if atomic.LoadInt32(&Debug) > 0 {
 		log.Printf(format, a...)
 	}
 	return

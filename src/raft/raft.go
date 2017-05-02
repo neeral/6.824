@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -92,7 +93,7 @@ const (
 	Leader
 )
 
-const DebugLock = 1
+const DebugLock = 0
 const DebugEncoding = 0
 
 type LogEntry struct {
@@ -105,12 +106,12 @@ type LogEntry struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.Lock()
-	defer rf.mu.Unlock()
+	defer rf.unlock()
 	return rf.currentTerm, rf.state == Leader
 }
 
 func (rf *Raft) Lock() {
-	if DebugLock > 0 {
+	if DebugLock > 0 && Debug > 0 {
 		DPrintf("%v get lock", rf.me)
 		debug.PrintStack()
 	}
@@ -118,6 +119,14 @@ func (rf *Raft) Lock() {
 	if DebugLock > 0 {
 		DPrintf("%v got lock", rf.me)
 	}
+}
+
+func (rf *Raft) unlock() {
+	if DebugLock > 0 && Debug > 0 {
+		DPrintf("%v unlocked", rf.me)
+		debug.PrintStack()
+	}
+	rf.mu.Unlock()
 }
 
 //
@@ -209,7 +218,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	DPrintf("%d received RequestVote from %d in term %d\n", rf.me, args.CandidateId, args.Term)
 	rf.Lock()
-	defer rf.mu.Unlock()
+	defer rf.unlock()
 	defer rf.persist()
 	rf.checkTerm(args.Term)
 	reply.Term = rf.currentTerm
@@ -220,6 +229,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = new(int)
 		*rf.votedFor = args.CandidateId
+		rf.heartbeat = time.Now()
+		rf.timeout = randomTimeout()
 	}
 }
 
@@ -288,6 +299,7 @@ func randomTimeout() time.Duration {
 }
 
 func (rf *Raft) promoteToCandidate() {
+	DPrintf("%v %v -> Candidate", rf.me, rf.state)
 	rf.state = Candidate
 	rf.currentTerm += 1
 	rf.votedFor = new(int)
@@ -307,8 +319,7 @@ func (rf *Raft) promoteToCandidate() {
 		args.LastLogTerm = last.Term
 	}
 	rf.persist()
-
-	DPrintf("%d asking for votes", rf.me)
+	DPrintf("%d asking for votes for term %v", rf.me, rf.currentTerm)
 	// send RequestVote in parallel to all servers
 	ch := make(chan RequestVoteReply, len(rf.peers)-1)
 	for i := range rf.peers {
@@ -324,7 +335,7 @@ func (rf *Raft) promoteToCandidate() {
 				DPrintf("%d received vote reply from %v %v", rf.me, server, reply)
 				ch <- reply
 			} else {
-				DPrintf("%d received vote reply from %v timed out", rf.me, server)
+				DPrintf("%d received vote reply from %v timed out from term %v", rf.me, server, args.Term)
 			}
 		}(i)
 	}
@@ -334,64 +345,49 @@ func (rf *Raft) promoteToCandidate() {
 	remaining := randomTimeout()
 	yes_votes := 1 // self-vote
 	majority := len(rf.peers)/2 + 1
-	rf.mu.Unlock()
-	defer rf.Lock()
-	for yes_votes < majority {
+	rf.unlock()
+	for {
 		select {
 		case <-time.After(remaining):
 			rf.Lock()
 			if rf.state != Candidate {
 				DPrintf("%d not a Candidate anymore", rf.me)
-				rf.mu.Unlock()
 				return
 			}
-			DPrintf("%d timed out waiting for responses as Candidate\n", rf.me)
+			DPrintf("%d timed out waiting for responses as Candidate in term %v\n", rf.me, args.Term)
 			rf.promoteToCandidate() // start a new election
-			rf.mu.Unlock()
 			return
 		case reply := <-ch:
 			rf.Lock()
 			if rf.state != Candidate {
 				DPrintf("%d not a Candidate anymore", rf.me)
-				rf.mu.Unlock()
 				return
 			}
 			remaining = start.Add(remaining).Sub(time.Now())
-			if ok := rf.checkTerm(reply.Term); ok {
-				DPrintf("%d Candidate->Follower\n", rf.me)
-				rf.mu.Unlock()
+			if deposed := rf.checkTerm(reply.Term); deposed {
 				return
 			}
 			if reply.VoteGranted {
 				yes_votes += 1
 			}
-			rf.mu.Unlock()
+			if yes_votes >= majority {
+				DPrintf("%d has won election %d", rf.me, rf.currentTerm)
+				rf.state = Leader
+				lastIndex := 0
+				if lastEntry, ok := rf.lastEntry(); ok {
+					lastIndex = lastEntry.Index
+				}
+				for i := range rf.peers {
+					rf.nextIndex[i] = lastIndex + 1
+					rf.matchIndex[i] = 0
+				}
+				rf.matchIndex[rf.me] = lastIndex
+				rf.sendHeartbeats()
+				return
+			}
+			rf.unlock()
 		}
 	}
-
-	// rf.mu is unlocked when you reach here
-	// you've received a majority of yes votes
-	rf.Lock()
-	if rf.state != Candidate {
-		DPrintf("%d not a Candidate anymore", rf.me)
-		rf.mu.Unlock()
-		return
-	}
-	DPrintf("%d has won election %d", rf.me, rf.currentTerm)
-	rf.state = Leader
-	lastIndex := 0
-	xLastEntry, xOk := rf.lastEntry()
-	DPrintf("%v promoteToCandidate lastEntry([%v]logs)=%v,%v", rf.me, len(rf.logs), xLastEntry, xOk)
-	if lastEntry, ok := rf.lastEntry(); ok {
-		lastIndex = lastEntry.Index
-	}
-	for i := range rf.peers {
-		rf.nextIndex[i] = lastIndex + 1
-		rf.matchIndex[i] = 0
-	}
-	rf.matchIndex[rf.me] = lastIndex
-	rf.sendHeartbeats()
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) lastEntry() (last LogEntry, ok bool) {
@@ -410,7 +406,7 @@ func (rf *Raft) mainLoop() {
 	for true {
 		rf.Lock()
 		state := rf.state
-		rf.mu.Unlock()
+		rf.unlock()
 		timeout := randomTimeout()
 		if state == Leader {
 			timeout /= 3
@@ -434,7 +430,7 @@ func (rf *Raft) mainLoop() {
 				// Qu how frequently to send heartbeats
 				rf.sendHeartbeats()
 			}
-			rf.mu.Unlock()
+			rf.unlock()
 		}
 	}
 }
@@ -456,7 +452,7 @@ func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 		rf.Lock()           // accessing state in rf
 		rf.applyCV.L.Lock() // waiting on CV
 		for rf.commitIndex <= rf.lastApplied {
-			rf.mu.Unlock() // release while waiting
+			rf.unlock() // release while waiting
 			rf.applyCV.Wait()
 			rf.Lock()
 		}
@@ -474,7 +470,7 @@ func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 			applyCh <- applyMsg
 			rf.lastApplied += 1
 		}
-		rf.mu.Unlock()
+		rf.unlock()
 	}
 }
 
@@ -517,7 +513,7 @@ func (aer AppendEntriesReply) String() string {
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.Lock()
-	defer rf.mu.Unlock()
+	defer rf.unlock()
 	defer rf.persist()
 
 	DPrintf("%d AppendEntries handler for %v", rf.me, *args)
@@ -525,6 +521,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartbeat = time.Now()
 	rf.timeout = randomTimeout()
 	reply.Term = rf.currentTerm
+
+	// demote Candidate if receives message from new leader
+	if args.Term == rf.currentTerm &&
+		rf.state == Candidate {
+		DPrintf("%v Candidate -> Follower", rf.me)
+		rf.state = Follower
+		rf.votedFor = nil
+	}
+
 	// 1. terms differ
 	if args.Term < rf.currentTerm {
 		reply.Success = false
@@ -701,7 +706,7 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 			}
 			DPrintf("%v AppendEntries %v reply from %v for %v", rf.me, reply, server, *args)
 			rf.Lock()
-			defer rf.mu.Unlock()
+			defer rf.unlock()
 			if rf.state != Leader {
 				DPrintf("%d not a Leader anymore", rf.me)
 				return
@@ -717,7 +722,10 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 				rf.matchIndexIs(server, lastEntry.Index)
 			} else if !reply.Success {
 				DPrintf("%v processing No() - begin nextIndex[%v]=%v", rf.me, server, rf.nextIndex[server])
-				if entry, ok := rf.findLastLogEntryWithTerm(reply.ConflictingTerm); ok {
+				// an old message was received from a previous term
+				if reply.Term < rf.currentTerm {
+					// ignore this message
+				} else if entry, ok := rf.findLastLogEntryWithTerm(reply.ConflictingTerm); ok {
 					DPrintf("%v findLastLogEntryWithTerm(%v)=%v", rf.me, *reply.ConflictingTerm, *entry)
 					rf.nextIndex[server] = entry.Index + 1
 				} else {
@@ -757,7 +765,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.Lock()
-	defer rf.mu.Unlock()
+	defer rf.unlock()
 
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
@@ -796,9 +804,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	atomic.StoreInt32(&Debug, 0)
 	rf.Lock()
-	defer rf.mu.Unlock()
-	Debug = 0
+	defer rf.unlock()
 	rf.state = Follower
 	rf.timeout = 10 * time.Minute // won't bother us for some time
 }
@@ -816,7 +824,7 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	Debug = kDebug
+	atomic.StoreInt32(&Debug, kDebug)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
