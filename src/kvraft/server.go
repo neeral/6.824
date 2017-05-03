@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -21,21 +21,22 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpType OpType
-	Key    string
-	Value  string // optional
+	OpType    OpType
+	Key       string
+	Value     string // optional
+	RequestId RequestId
 }
 
-func OpAppend(key, value string) Op {
-	return Op{Append, key, value}
+func OpAppend(key, value string, r RequestId) Op {
+	return Op{Append, key, value, r}
 }
 
-func OpGet(key string) Op {
-	return Op{Get, key, ""}
+func OpGet(key string, r RequestId) Op {
+	return Op{Get, key, "", r}
 }
 
-func OpPut(key, value string) Op {
-	return Op{Put, key, value}
+func OpPut(key, value string, r RequestId) Op {
+	return Op{Put, key, value, r}
 }
 
 type RaftKV struct {
@@ -47,15 +48,89 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	state map[string]string
+	state     map[string]string
+	completed map[string]uint32
+	gets      map[RequestId]string
+	cv        *sync.Cond
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if kv.requestAlreadyCompleted(args.RequestId) {
+		reply.Value = kv.gets[args.RequestId]
+		return
+	}
+	op := OpGet(args.Key, args.RequestId)
+	kv.cv.L.Lock()
+	defer kv.cv.L.Unlock()
+	index, term, isLeader := kv.rf.Start(op)
+	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
+	if !isLeader {
+		reply.R = Reply{true, ""}
+		return
+	}
+	for kv.completed[args.RequestId.ClerkId] < args.RequestId.SeqNum {
+		kv.cv.Wait()
+	}
+	reply.Value = kv.gets[args.RequestId]
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DPrintf("%v PutAppend args=%v", kv.me, *args)
+	if kv.requestAlreadyCompleted(args.RequestId) {
+		DPrintf("request already completed")
+		return
+	}
+	var op Op
+	switch args.Op {
+	case "Append":
+		op = OpAppend(args.Key, args.Value, args.RequestId)
+	case "Put":
+		op = OpPut(args.Key, args.Value, args.RequestId)
+	}
+	DPrintf("get lock")
+	kv.cv.L.Lock()
+	DPrintf("got lock")
+	defer kv.cv.L.Unlock()
+	index, term, isLeader := kv.rf.Start(op)
+	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
+	if !isLeader {
+		reply.R = Reply{true, ""}
+		return
+	}
+	for kv.completed[args.RequestId.ClerkId] < args.RequestId.SeqNum {
+		kv.cv.Wait()
+	}
+}
+
+// Assumes that a clerk can have atmost one outstanding request at a time
+func (kv *RaftKV) apply() {
+	for applyMsg := range kv.applyCh {
+		op := applyMsg.Command.(Op)
+		kv.cv.L.Lock()
+		switch op.OpType {
+		case Append:
+			kv.state[op.Key] += op.Value
+		case Get:
+			kv.gets[op.RequestId] = kv.state[op.Key]
+		case Put:
+			kv.state[op.Key] = op.Value
+		}
+		// TODO more sophistication below, max() or ???
+		kv.completed[op.RequestId.ClerkId] = op.RequestId.SeqNum
+		kv.cv.Signal()
+		kv.cv.L.Unlock()
+	}
+}
+
+func (kv *RaftKV) requestAlreadyCompleted(r RequestId) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if seqNum, ok := kv.completed[r.ClerkId]; ok {
+		return r.SeqNum <= seqNum
+	}
+	return false
 }
 
 //
@@ -92,11 +167,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.state = make(map[string]string)
+	kv.completed = make(map[string]uint32)
+	kv.gets = make(map[RequestId]string)
+	kv.cv = sync.NewCond(&kv.mu)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.apply()
 
 	return kv
 }

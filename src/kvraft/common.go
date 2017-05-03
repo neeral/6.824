@@ -23,6 +23,9 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
+	R Reply
+}
+type Reply struct {
 	WrongLeader bool
 	Err         Err
 }
@@ -34,22 +37,17 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	WrongLeader bool
-	Err         Err
-	Value       string
+	R     Reply
+	Value string
 }
 
 type RequestId struct {
-	clerkId string
-	seqNum  int
-}
-
-func makeRequestId(clerkId string, seqNum int) RequestId {
-	return RequestId{clerkId, seqNum}
+	ClerkId string
+	SeqNum  uint32
 }
 
 func (r *RequestId) String() string {
-	return fmt.Sprintf("%v:::%v", r.clerkId, r.seqNum)
+	return fmt.Sprintf("%v:::%v", r.ClerkId, r.SeqNum)
 }
 
 type OpType int
@@ -72,3 +70,36 @@ func (o OpType) String() string {
 		return "Unknown OpType"
 	}
 }
+
+/*
+type ErrReply interface {
+	IsErr() bool
+}
+*/
+func (r *Reply) IsErr() bool {
+	return r.Err.IsErr()
+}
+
+/*
+func (gr *GetReply) IsErr() bool {
+	return gr.Err.IsErr()
+}
+*/
+func (e Err) IsErr() bool {
+	return len(e) > 0
+}
+
+/*
+type ReplyWithWrongLeader interface {
+	WrongLeader() bool
+}
+*/
+/*
+func (par *PutAppendReply) WrongLeader() bool {
+	return par.WrongLeader
+}
+
+func (gr *GetReply) WrongLeader() bool {
+	return gr.WrongLeader()
+}
+*/

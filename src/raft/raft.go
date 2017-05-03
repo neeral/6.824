@@ -583,7 +583,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// 4. append
 		rf.logs = append(rf.logs, args.Entries[appendFrom:]...)
-		DPrintf("%v has len(logs)=%v after append: %v", rf.me, len(rf.logs), rf.logs)
+		DPrintf("%v has len(logs)=%v after append", rf.me, len(rf.logs))
 	}
 
 	// 5. commit indices differ
@@ -593,10 +593,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			indexOfLastNewEntry = lastEntry.Index
 		}
 		rf.commitIndex = Min(args.LeaderCommit, indexOfLastNewEntry)
+
+		rf.unlock()
+		defer rf.Lock()
+
 		rf.applyCV.L.Lock()
 		defer rf.applyCV.L.Unlock()
 		rf.applyCV.Signal()
 	}
+	DPrintf("%v sending AppendEntries reply %v", rf.me, *reply)
 }
 
 func createBasicAppendEntriesArgs(rf *Raft) AppendEntriesArgs {
@@ -689,7 +694,7 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 		}
 
 		var entries []LogEntry
-		DPrintf("%v append [%v,%v)", rf.me, rf.nextIndex[i]-1, end)
+		//		DPrintf("%v append [%v,%v)", rf.me, rf.nextIndex[i]-1, end)
 		for j := rf.nextIndex[i] - 1; j < end; j++ {
 			entries = append(entries, rf.logs[j])
 		}
@@ -723,7 +728,7 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 			} else if !reply.Success {
 				DPrintf("%v processing No() - begin nextIndex[%v]=%v", rf.me, server, rf.nextIndex[server])
 				// an old message was received from a previous term
-				if reply.Term < rf.currentTerm {
+				if args.Term < rf.currentTerm {
 					// ignore this message
 				} else if entry, ok := rf.findLastLogEntryWithTerm(reply.ConflictingTerm); ok {
 					DPrintf("%v findLastLogEntryWithTerm(%v)=%v", rf.me, *reply.ConflictingTerm, *entry)
@@ -764,7 +769,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
+	DPrintf("%v Start(%v) - acquiring lock", rf.me, command)
 	rf.Lock()
+	DPrintf("%v Start(%v) - got lock", rf.me, command)
 	defer rf.unlock()
 
 	term := rf.currentTerm
@@ -787,7 +794,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, entry)
 	rf.matchIndexIs(rf.me, index)
 	rf.persist()
-	DPrintf("Start(%v)", entry.Command)
+	DPrintf("%v Start(%v) - added to own log", rf.me, command)
 
 	// create AppendEntriesArg and send RPC, then return
 	args := createBasicAppendEntriesArgs(rf)
