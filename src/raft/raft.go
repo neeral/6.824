@@ -449,14 +449,10 @@ func findLogEntryWithIndex(logs []LogEntry, idx int) (*LogEntry, bool) {
 // applies these.
 func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 	for true {
-		rf.Lock()           // accessing state in rf
-		rf.applyCV.L.Lock() // waiting on CV
+		rf.Lock()
 		for rf.commitIndex <= rf.lastApplied {
-			rf.unlock() // release while waiting
 			rf.applyCV.Wait()
-			rf.Lock()
 		}
-		rf.applyCV.L.Unlock()
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			logEntry, ok := findLogEntryWithIndex(rf.logs, i)
 			if !ok {
@@ -593,12 +589,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			indexOfLastNewEntry = lastEntry.Index
 		}
 		rf.commitIndex = Min(args.LeaderCommit, indexOfLastNewEntry)
-
-		rf.unlock()
-		defer rf.Lock()
-
-		rf.applyCV.L.Lock()
-		defer rf.applyCV.L.Unlock()
 		rf.applyCV.Signal()
 	}
 	DPrintf("%v sending AppendEntries reply %v", rf.me, *reply)
@@ -624,14 +614,12 @@ func (rf *Raft) sendHeartbeats() bool {
 
 func updateCommitIndex(rf *Raft) {
 	if middle, ok := Middle(rf.matchIndex); ok && middle > 0 {
-		DPrintf("updateCommitIndex middle=%v commitIndex=%v matchIndex=%v %v", middle, rf.commitIndex, rf.matchIndex, rf.me)
+		DPrintf("%v updateCommitIndex middle=%v commitIndex=%v matchIndex=%v", rf.me, middle, rf.commitIndex, rf.matchIndex)
 		entry := rf.logs[middle-1]
 		if middle > rf.commitIndex &&
 			entry.Term == rf.currentTerm {
 			DPrintf("%v updateCommitIndex %v->%v", rf.me, rf.commitIndex, middle)
 			rf.commitIndex = middle
-			rf.applyCV.L.Lock()
-			defer rf.applyCV.L.Unlock()
 			rf.applyCV.Signal()
 		}
 	}
@@ -856,8 +844,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.mainLoop()
 
-	m := sync.Mutex{}
-	rf.applyCV = sync.NewCond(&m)
+	rf.applyCV = sync.NewCond(&rf.mu)
 	go rf.applyLogEntries(applyCh)
 
 	return rf
