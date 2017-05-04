@@ -24,7 +24,7 @@ import (
 	"labrpc"
 	"log"
 	"math/rand"
-	"runtime/debug"
+	//	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,7 +93,7 @@ const (
 	Leader
 )
 
-const DebugLock = 0
+const DebugLock = 1
 const DebugEncoding = 0
 
 type LogEntry struct {
@@ -105,26 +105,26 @@ type LogEntry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.Lock()
-	defer rf.unlock()
+	rf.Lock("GetState")
+	defer rf.unlock("GetState")
 	return rf.currentTerm, rf.state == Leader
 }
 
-func (rf *Raft) Lock() {
+func (rf *Raft) Lock(msg string) {
 	if DebugLock > 0 && Debug > 0 {
-		DPrintf("%v get lock", rf.me)
-		debug.PrintStack()
+		DPrintf("%v get lock at %v", rf.me, msg)
+		//		debug.PrintStack()
 	}
 	rf.mu.Lock()
 	if DebugLock > 0 {
-		DPrintf("%v got lock", rf.me)
+		DPrintf("%v got lock at %v", rf.me, msg)
 	}
 }
 
-func (rf *Raft) unlock() {
+func (rf *Raft) unlock(msg string) {
 	if DebugLock > 0 && Debug > 0 {
-		DPrintf("%v unlocked", rf.me)
-		debug.PrintStack()
+		DPrintf("%v unlocked at %v", rf.me, msg)
+		//		debug.PrintStack()
 	}
 	rf.mu.Unlock()
 }
@@ -217,8 +217,8 @@ func (rvr RequestVoteReply) String() string {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	DPrintf("%d received RequestVote from %d in term %d\n", rf.me, args.CandidateId, args.Term)
-	rf.Lock()
-	defer rf.unlock()
+	rf.Lock("RequestVote")
+	defer rf.unlock("RequestVote")
 	defer rf.persist()
 	rf.checkTerm(args.Term)
 	reply.Term = rf.currentTerm
@@ -345,11 +345,11 @@ func (rf *Raft) promoteToCandidate() {
 	remaining := randomTimeout()
 	yes_votes := 1 // self-vote
 	majority := len(rf.peers)/2 + 1
-	rf.unlock()
+	rf.unlock("promoteToCandidate wait")
 	for {
 		select {
 		case <-time.After(remaining):
-			rf.Lock()
+			rf.Lock("promoteToCandidate timeout")
 			if rf.state != Candidate {
 				DPrintf("%d not a Candidate anymore", rf.me)
 				return
@@ -358,7 +358,7 @@ func (rf *Raft) promoteToCandidate() {
 			rf.promoteToCandidate() // start a new election
 			return
 		case reply := <-ch:
-			rf.Lock()
+			rf.Lock("promoteToCandidate reply")
 			if rf.state != Candidate {
 				DPrintf("%d not a Candidate anymore", rf.me)
 				return
@@ -385,7 +385,7 @@ func (rf *Raft) promoteToCandidate() {
 				rf.sendHeartbeats()
 				return
 			}
-			rf.unlock()
+			rf.unlock("promoteToCandidate reply")
 		}
 	}
 }
@@ -404,16 +404,16 @@ func (rf *Raft) lastEntry() (last LogEntry, ok bool) {
 // promotes to Candidate state. If already a Leader, sends heartbeats.
 func (rf *Raft) mainLoop() {
 	for true {
-		rf.Lock()
+		rf.Lock("mainLoop")
 		state := rf.state
-		rf.unlock()
+		rf.unlock("mainLoop")
 		timeout := randomTimeout()
 		if state == Leader {
 			timeout /= 3
 		}
 		select {
 		case <-time.After(timeout):
-			rf.Lock()
+			rf.Lock("mainLoop timed out")
 
 			switch rf.state {
 			case Candidate:
@@ -430,7 +430,7 @@ func (rf *Raft) mainLoop() {
 				// Qu how frequently to send heartbeats
 				rf.sendHeartbeats()
 			}
-			rf.unlock()
+			rf.unlock("mainLoop timed out")
 		}
 	}
 }
@@ -449,7 +449,7 @@ func findLogEntryWithIndex(logs []LogEntry, idx int) (*LogEntry, bool) {
 // applies these.
 func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 	for true {
-		rf.Lock()
+		rf.Lock("applyLogEntries")
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCV.Wait()
 		}
@@ -462,11 +462,12 @@ func (rf *Raft) applyLogEntries(applyCh chan<- ApplyMsg) {
 			applyMsg := ApplyMsg{}
 			applyMsg.Index = logEntry.Index
 			applyMsg.Command = logEntry.Command
-			DPrintf("%v <- applyCh", rf.me)
+			DPrintf("%v <- applyCh(%v) - begin", rf.me, applyMsg)
 			applyCh <- applyMsg
+			DPrintf("%v <- applyCh(%v) - end", rf.me, applyMsg)
 			rf.lastApplied += 1
 		}
-		rf.unlock()
+		rf.unlock("applyLogEntries")
 	}
 }
 
@@ -508,8 +509,8 @@ func (aer AppendEntriesReply) String() string {
 // AppendEntries RPC handler.
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.Lock()
-	defer rf.unlock()
+	rf.Lock("AppendEntries RPC handler")
+	defer rf.unlock("AppendEntries RPC handler")
 	defer rf.persist()
 
 	DPrintf("%d AppendEntries handler for %v", rf.me, *args)
@@ -698,8 +699,8 @@ func (rf *Raft) sendAppendEntriesToAll(template *AppendEntriesArgs) bool {
 				return
 			}
 			DPrintf("%v AppendEntries %v reply from %v for %v", rf.me, reply, server, *args)
-			rf.Lock()
-			defer rf.unlock()
+			rf.Lock("AppendEntries reply")
+			defer rf.unlock("AppendEntries reply")
 			if rf.state != Leader {
 				DPrintf("%d not a Leader anymore", rf.me)
 				return
@@ -758,9 +759,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	DPrintf("%v Start(%v) - acquiring lock", rf.me, command)
-	rf.Lock()
+	rf.Lock("Start")
 	DPrintf("%v Start(%v) - got lock", rf.me, command)
-	defer rf.unlock()
+	defer rf.unlock("Start")
 
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
@@ -800,8 +801,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	atomic.StoreInt32(&Debug, 0)
-	rf.Lock()
-	defer rf.unlock()
+	rf.Lock("Kill")
+	defer rf.unlock("Kill")
 	rf.state = Follower
 	rf.timeout = 10 * time.Minute // won't bother us for some time
 }
