@@ -2,13 +2,14 @@ package raftkv
 
 import (
 	"encoding/gob"
+	"fmt"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,7 +41,6 @@ func OpPut(key, value string, r RequestId) Op {
 }
 
 type RaftKV struct {
-	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -54,6 +54,31 @@ type RaftKV struct {
 	cv        *sync.Cond
 }
 
+func (kv *RaftKV) lock(msg string) {
+	DPrintf("%v get lock at kv-%v", kv.me, msg)
+	kv.cv.L.Lock()
+	DPrintf("%v got lock at kv-%v", kv.me, msg)
+}
+
+func (kv *RaftKV) unlock(msg string) {
+	DPrintf("%v unlocked at kv-%v", kv.me, msg)
+	kv.cv.L.Unlock()
+}
+
+func (kv *RaftKV) start(req RequestId, op Op) bool {
+	index, term, isLeader := kv.rf.Start(op)
+	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
+	if !isLeader {
+		return false
+	}
+	kv.lock("start")
+	defer kv.unlock("start")
+	for kv.completed[req.ClerkId] < req.SeqNum {
+		kv.cv.Wait()
+	}
+	return true
+}
+
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	if kv.requestAlreadyCompleted(args.RequestId) {
@@ -61,18 +86,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	op := OpGet(args.Key, args.RequestId)
-	kv.cv.L.Lock()
-	defer kv.cv.L.Unlock()
-	index, term, isLeader := kv.rf.Start(op)
-	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
+	isLeader := kv.start(args.RequestId, op)
 	if !isLeader {
 		reply.R = Reply{true, ""}
-		return
+	} else {
+		reply.Value = kv.gets[args.RequestId]
 	}
-	for kv.completed[args.RequestId.ClerkId] < args.RequestId.SeqNum {
-		kv.cv.Wait()
-	}
-	reply.Value = kv.gets[args.RequestId]
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -89,18 +108,9 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case "Put":
 		op = OpPut(args.Key, args.Value, args.RequestId)
 	}
-	DPrintf("get lock")
-	kv.cv.L.Lock()
-	DPrintf("got lock")
-	defer kv.cv.L.Unlock()
-	index, term, isLeader := kv.rf.Start(op)
-	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
+	isLeader := kv.start(args.RequestId, op)
 	if !isLeader {
 		reply.R = Reply{true, ""}
-		return
-	}
-	for kv.completed[args.RequestId.ClerkId] < args.RequestId.SeqNum {
-		kv.cv.Wait()
 	}
 }
 
@@ -108,7 +118,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) apply() {
 	for applyMsg := range kv.applyCh {
 		op := applyMsg.Command.(Op)
-		kv.cv.L.Lock()
+		kv.lock(fmt.Sprintf("apply(%v)", op))
 		switch op.OpType {
 		case Append:
 			kv.state[op.Key] += op.Value
@@ -120,13 +130,13 @@ func (kv *RaftKV) apply() {
 		// TODO more sophistication below, max() or ???
 		kv.completed[op.RequestId.ClerkId] = op.RequestId.SeqNum
 		kv.cv.Signal()
-		kv.cv.L.Unlock()
+		kv.unlock("apply")
 	}
 }
 
 func (kv *RaftKV) requestAlreadyCompleted(r RequestId) bool {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.lock("requestAlreadyCompleted")
+	defer kv.unlock("requestAlreadyCompleted")
 	if seqNum, ok := kv.completed[r.ClerkId]; ok {
 		return r.SeqNum <= seqNum
 	}
@@ -170,7 +180,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.state = make(map[string]string)
 	kv.completed = make(map[string]uint32)
 	kv.gets = make(map[RequestId]string)
-	kv.cv = sync.NewCond(&kv.mu)
+	mu := sync.Mutex{}
+	kv.cv = sync.NewCond(&mu)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
