@@ -30,6 +30,17 @@ type Reply struct {
 	Err         Err
 }
 
+func (r Reply) String() string {
+	s := "Yes"
+	if r.WrongLeader {
+		s = "No"
+	}
+	if r.IsErr() {
+		s += fmt.Sprintf("(err=%v)", r.Err)
+	}
+	return s
+}
+
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
@@ -46,7 +57,13 @@ type RequestId struct {
 	SeqNum  uint32
 }
 
-func (r *RequestId) String() string {
+func (par PutAppendReply) String() string {
+	return fmt.Sprintf("%v", par.R)
+}
+func (gr GetReply) String() string {
+	return fmt.Sprintf("%v[%v]", gr.R, gr.Value)
+}
+func (r RequestId) String() string {
 	return fmt.Sprintf("%v:::%v", r.ClerkId, r.SeqNum)
 }
 

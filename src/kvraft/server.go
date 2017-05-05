@@ -7,9 +7,12 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
-const Debug = 0
+const Debug = 1
+const Pending = "PENDING"
+const kTimeout = time.Second
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -48,9 +51,9 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	state     map[string]string
-	completed map[string]uint32
-	gets      map[RequestId]string
+	state     map[string]string    // kv map
+	completed map[string]uint32    // clerkId -> max SeqNum
+	gets      map[RequestId]string // result of gets
 	cv        *sync.Cond
 }
 
@@ -67,22 +70,43 @@ func (kv *RaftKV) unlock(msg string) {
 
 func (kv *RaftKV) start(req RequestId, op Op) bool {
 	index, term, isLeader := kv.rf.Start(op)
+	if op.OpType == Get {
+		kv.lock("start - add pending")
+		kv.gets[req] = Pending
+		kv.unlock("start - add pending")
+	}
 	DPrintf("%v, %v, %v := kv.rf.Start(%v)", index, term, isLeader, op)
 	if !isLeader {
 		return false
 	}
-	kv.lock("start")
-	defer kv.unlock("start")
-	for kv.completed[req.ClerkId] < req.SeqNum {
-		kv.cv.Wait()
+	done := make(chan struct{})
+	go func() {
+		kv.lock("start")
+		defer kv.unlock("start")
+		for kv.completed[req.ClerkId] < req.SeqNum {
+			kv.cv.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(kTimeout):
+		if op.OpType == Get {
+			kv.lock("start - del pending")
+			delete(kv.gets, req)
+			kv.unlock("start - del pending")
+		}
+		return false
 	}
-	return true
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	defer func() { DPrintf("%v Get sending %v", kv.me, *reply) }()
 	if kv.requestAlreadyCompleted(args.RequestId) {
-		reply.Value = kv.gets[args.RequestId]
+		DPrintf("request already completed")
+		reply.R = Reply{false, "Request already completed"}
 		return
 	}
 	op := OpGet(args.Key, args.RequestId)
@@ -90,7 +114,13 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	if !isLeader {
 		reply.R = Reply{true, ""}
 	} else {
+		kv.lock("get")
+		defer kv.unlock("get")
 		reply.Value = kv.gets[args.RequestId]
+		if reply.Value == Pending {
+			panic(fmt.Sprintf("Get(%v) from request %v is %v", args.Key, args.RequestId, Pending))
+		}
+		delete(kv.gets, args.RequestId)
 	}
 }
 
@@ -99,6 +129,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("%v PutAppend args=%v", kv.me, *args)
 	if kv.requestAlreadyCompleted(args.RequestId) {
 		DPrintf("request already completed")
+		reply.R = Reply{false, "Request already completed"}
 		return
 	}
 	var op Op
@@ -123,7 +154,9 @@ func (kv *RaftKV) apply() {
 		case Append:
 			kv.state[op.Key] += op.Value
 		case Get:
-			kv.gets[op.RequestId] = kv.state[op.Key]
+			if _, ok := kv.gets[op.RequestId]; ok {
+				kv.gets[op.RequestId] = kv.state[op.Key]
+			}
 		case Put:
 			kv.state[op.Key] = op.Value
 		}

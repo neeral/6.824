@@ -13,9 +13,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	id     string
-	seqNum uint32
-	leader int32
+	id, _id string
+	seqNum  uint32
+	leader  int32
 }
 
 func nrand() int64 {
@@ -36,9 +36,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ck.id = string(uuid)
-	ck.id = strings.TrimSpace(ck.id)
-	ck.id = "ck" + ck.id[:2]
+	ck._id = string(uuid)
+	ck._id = strings.TrimSpace(ck._id)
+	ck.id = "ck" + ck._id[:3]
+	DPrintf("%v New clerk %v created", ck.id, ck._id)
 	ck.seqNum = 0
 	ck.leader = 0 // to begin with
 	return ck
@@ -67,16 +68,17 @@ func (ck *Clerk) Get(key string) string {
 		for i := 0; i < len(ck.servers); i++ {
 			j := (l + i) % len(ck.servers)
 			reply := GetReply{}
+			DPrintf("%v sending Get(%v) to %v", ck.id, args.Key, j)
 			ok := ck.servers[j].Call("RaftKV.Get", &args, &reply)
 			if ok {
-				ck.updateLeader(int32(j), reply.R)
+				ck.updateLeader(l, j, reply.R)
 				if !reply.R.WrongLeader &&
 					!reply.R.IsErr() {
-					DPrintf("%v Get(%v) = (%v, %v)", ck.id, key, ok, reply.R)
+					DPrintf("%v Get(%v) = (%v, %v)", ck.id, key, ok, reply)
 					return reply.Value
 				}
 			}
-			DPrintf("%v Get(%v) = (%v, %v)", ck.id, key, ok, reply.R)
+			DPrintf("%v Get(%v) = (%v, %v)", ck.id, key, ok, reply)
 		}
 	}
 }
@@ -98,14 +100,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// TODO implement retries
 	for {
 		l := ck.getLeader()
-		DPrintf("%v leader = %v", ck.id, l)
 		for i := 0; i < len(ck.servers); i++ {
 			j := (l + i) % len(ck.servers)
 			reply := PutAppendReply{}
 			DPrintf("%v sending Put %v->%v to %v", ck.id, args.Key, args.Value, j)
 			ok := ck.servers[j].Call("RaftKV.PutAppend", &args, &reply)
 			if ok {
-				ck.updateLeader(int32(j), reply.R)
+				ck.updateLeader(l, j, reply.R)
 				if !reply.R.WrongLeader &&
 					!reply.R.IsErr() {
 					DPrintf("%v PutAppend(%v) = (%v, %v)", ck.id, key, ok, reply)
@@ -126,7 +127,7 @@ func (ck *Clerk) Append(key string, value string) {
 
 func (ck *Clerk) nextRequestId() RequestId {
 	n := atomic.AddUint32(&ck.seqNum, 1)
-	return RequestId{ck.id, n}
+	return RequestId{ck._id, n}
 }
 
 func (ck *Clerk) getLeader() int {
@@ -134,12 +135,10 @@ func (ck *Clerk) getLeader() int {
 }
 
 // if WrongLeader, randomly update leader
-func (ck *Clerk) updateLeader(sentTo int32, r Reply) {
-	if r.WrongLeader {
-		maybeNewLeader := (int(atomic.LoadInt32(&ck.leader)) + 1) % len(ck.servers)
-		atomic.CompareAndSwapInt32(&ck.leader, sentTo, int32(maybeNewLeader))
-	} else {
-		atomic.CompareAndSwapInt32(&ck.leader, sentTo, int32(sentTo))
+func (ck *Clerk) updateLeader(oldLeader, sentTo int, r Reply) {
+	if !r.WrongLeader && oldLeader != sentTo {
+		atomic.CompareAndSwapInt32(&ck.leader, int32(oldLeader), int32(sentTo))
+		DPrintf("%v leader %v->%v", ck.id, oldLeader, sentTo)
 	}
 
 }
