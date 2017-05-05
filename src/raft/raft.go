@@ -758,10 +758,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	DPrintf("%v Start(%v) - acquiring lock", rf.me, command)
-	rf.Lock("Start")
-	DPrintf("%v Start(%v) - got lock", rf.me, command)
-	defer rf.unlock("Start")
+	rf.Lock(fmt.Sprintf("Start(%v)", command))
+	defer rf.unlock(fmt.Sprintf("Start(%v)", command))
 
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
